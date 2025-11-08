@@ -1,0 +1,10 @@
+[package]
+name = "binaural_8d_audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hrtf = "0.8.1"
+hound = "3.5.1"
+biquad = "0.5"
+freeverb = "0.1"
