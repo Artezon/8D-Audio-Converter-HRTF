@@ -146,6 +146,22 @@ fn normalize_vec3(v: Vec3) -> Vec3 {
     }
 }
 
+/// Calculate distance-based gain using inverse square law
+fn calculate_distance_gain(distance: f32) -> f32 {
+    // Reference distance where gain = 1.0
+    let reference_distance = 1.0;
+    // Minimum distance to prevent extreme gain at very close distances
+    let min_distance = 0.1;
+
+    let d = distance.max(min_distance);
+
+    // Inverse square law: gain = (reference / distance)^2
+    // let gain = f32::powi(reference_distance / (d * 0.25).max(1.0), 2);
+    let gain = f32::powf(reference_distance / d, 1.5);
+
+    gain.min(2.0)
+}
+
 /// Position calculator for different movement patterns with oscillating parameters
 struct PositionCalculator {
     pattern: MovementPattern,
@@ -158,6 +174,7 @@ struct PositionCalculator {
     distance: ParamValue,
     distance_osc_speed: f32,
     prev_pos: Vec3,
+    prev_distance: f32,
 }
 
 impl PositionCalculator {
@@ -182,10 +199,11 @@ impl PositionCalculator {
             distance,
             distance_osc_speed,
             prev_pos: Vec3::new(0.0, 0.0, 1.0),
+            prev_distance: distance.min,
         }
     }
 
-    fn get_position(&mut self, dt: f32) -> Vec3 {
+    fn get_position(&mut self, dt: f32) -> (Vec3, f32) {
         self.time += dt;
 
         let current_velocity = self.velocity.get_value(self.time, self.velocity_osc_speed);
@@ -193,23 +211,23 @@ impl PositionCalculator {
         let current_elevation_deg = self
             .elevation
             .get_value(self.time, self.elevation_osc_speed);
-        let elevation_rad = current_elevation_deg * PI / 180.0;
+        let current_elevation_rad = current_elevation_deg * PI / 180.0;
 
-        let pos = match self.pattern {
+        let current_pos = match self.pattern {
             MovementPattern::Circular => {
                 let angle = self.time * current_velocity * 2.0 * PI + self.start_angle;
-                let x = angle.cos() * current_distance * elevation_rad.cos();
-                let z = angle.sin() * current_distance * elevation_rad.cos();
-                let y = elevation_rad.sin() * current_distance;
+                let x = angle.cos() * current_distance * current_elevation_rad.cos();
+                let z = angle.sin() * current_distance * current_elevation_rad.cos();
+                let y = current_elevation_rad.sin() * current_distance;
                 Vec3::new(x, y, z)
             }
             MovementPattern::Figure8 => {
                 let angle = self.time * current_velocity * PI + self.start_angle;
-                let x = angle.cos() * current_distance * elevation_rad.cos();
+                let x = angle.cos() * current_distance * current_elevation_rad.cos();
                 let y_pattern =
                     (self.time * current_velocity * 2.0 * PI).sin() * current_distance * 0.5;
-                let z = angle.sin() * current_distance * elevation_rad.cos();
-                let y = y_pattern + elevation_rad.sin() * current_distance;
+                let z = angle.sin() * current_distance * current_elevation_rad.cos();
+                let y = y_pattern + current_elevation_rad.sin() * current_distance;
                 Vec3::new(x, y, z)
             }
             MovementPattern::Spiral => {
@@ -217,20 +235,20 @@ impl PositionCalculator {
                 let spiral_progress = (self.time * current_velocity * 0.1).sin() * 0.5 + 0.5; // Slow oscillation = more turns
                 let spiral_radius = current_distance * (0.2 + 0.8 * spiral_progress); // Keep minimum radius
                 let angle = self.time * current_velocity * 4.0 * PI + self.start_angle;
-                let x = angle.cos() * spiral_radius * elevation_rad.cos();
-                let z = angle.sin() * spiral_radius * elevation_rad.cos();
+                let x = angle.cos() * spiral_radius * current_elevation_rad.cos();
+                let z = angle.sin() * spiral_radius * current_elevation_rad.cos();
                 let y = (self.time * current_velocity * 2.0 * PI).sin() * current_distance * 0.5
-                    + elevation_rad.sin() * current_distance;
+                    + current_elevation_rad.sin() * current_distance;
                 Vec3::new(x, y, z)
             }
             MovementPattern::Random => {
                 let t = self.time * current_velocity;
                 let x = (t.sin() * 0.7 + (t * 3.7).sin() * 0.3)
                     * current_distance
-                    * elevation_rad.cos();
+                    * current_elevation_rad.cos();
                 let y_pattern = (t * 1.3).sin() * current_distance * 0.5;
-                let z = (t * 2.1).cos() * current_distance * elevation_rad.cos();
-                let y = y_pattern + elevation_rad.sin() * current_distance;
+                let z = (t * 2.1).cos() * current_distance * current_elevation_rad.cos();
+                let y = y_pattern + current_elevation_rad.sin() * current_distance;
                 Vec3::new(x, y, z)
             }
             MovementPattern::VerticalCircle => {
@@ -251,8 +269,10 @@ impl PositionCalculator {
             }
         };
 
-        self.prev_pos = pos;
-        pos
+        self.prev_pos = current_pos;
+        self.prev_distance = current_distance;
+
+        (current_pos, current_distance)
     }
 }
 
@@ -323,6 +343,7 @@ impl Audio8DProcessor {
 
         let dt = chunk_size as f32 / self.sample_rate as f32;
         let mut prev_pos = Vec3::new(0.0, 0.0, 1.0);
+        let mut prev_distance = 1.0;
 
         let num_chunks = (total_samples + chunk_size - 1) / chunk_size;
         let total_samples_f = total_samples as f32;
@@ -351,12 +372,17 @@ impl Audio8DProcessor {
                 mid_high_buffer[i] = high;
             }
 
-            // Calculate positions for this chunk
-            let new_pos = position_calc.get_position(dt);
+            // Calculate positions and distances for this chunk
+            let (new_pos, new_distance) = position_calc.get_position(dt);
+
             let prev_pos_normalized = normalize_vec3(prev_pos);
             let new_pos_normalized = normalize_vec3(new_pos);
 
-            // Process mid/high frequencies with HRTF
+            // Calculate distance gains using inverse square law
+            let new_distance_gain = calculate_distance_gain(new_distance);
+            let prev_distance_gain = calculate_distance_gain(prev_distance);
+
+            // Process mid/high frequencies with HRTF and distance attenuation
             let mut mid_high_output = vec![(0.0, 0.0); chunk_size];
             let mid_high_context = HrtfContext {
                 source: &mid_high_buffer,
@@ -365,18 +391,26 @@ impl Audio8DProcessor {
                 prev_sample_vector: prev_pos_normalized,
                 prev_left_samples: &mut midhi_prev_left,
                 prev_right_samples: &mut midhi_prev_right,
-                new_distance_gain: 1.0,
-                prev_distance_gain: 1.0,
+                new_distance_gain,
+                prev_distance_gain,
             };
 
             self.hrtf_processor.process_samples(mid_high_context);
 
-            // Combine bass (no HRTF, just mono to stereo) and mid/high, then add reverb
+            // Calculate bass distance gain (interpolate across chunk)
+            let bass_gain_start = f32::powf(prev_distance_gain, 0.75);
+            let bass_gain_end = f32::powf(new_distance_gain, 0.75);
+
+            // Combine bass (with distance attenuation) and mid/high, then add reverb
             for i in 0..chunk_size {
                 let (mid_high_left, mid_high_right) = mid_high_output[i];
 
-                // Bass is played as-is (centered, no spatial processing)
-                let bass_mono = bass_buffer[i];
+                // Interpolate bass gain across the chunk
+                let t = i as f32 / chunk_size as f32;
+                let bass_gain = bass_gain_start + (bass_gain_end - bass_gain_start) * t;
+
+                // Bass is played as-is (centered, no spatial processing) but with distance attenuation
+                let bass_mono = bass_buffer[i] * bass_gain;
                 let bass_left = bass_mono;
                 let bass_right = bass_mono;
 
@@ -396,6 +430,7 @@ impl Audio8DProcessor {
             }
 
             prev_pos = new_pos;
+            prev_distance = new_distance;
         }
 
         output
@@ -515,7 +550,7 @@ fn print_usage(program_name: &str) {
         program_name
     );
     println!(
-        "  {} input.wav --distance 2,4 --start-angle 90",
+        "  {} input.wav --distance 0.5,3 --start-angle 90",
         program_name
     );
     println!("\nNotes:");
@@ -726,7 +761,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let normalized_output: Vec<(f32, f32)> = if max_sample > 0.001 {
         let target_level = 0.945; // -0.5 dB
-        let gain = target_level / max_sample;
+        let gain = (target_level / max_sample).min(1.0);
         println!("✓ Normalized to -0.5 dB (gain: {:.3}x)\n", gain);
 
         output_samples
