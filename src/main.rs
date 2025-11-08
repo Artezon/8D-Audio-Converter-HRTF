@@ -14,7 +14,38 @@ enum MovementPattern {
     Spiral,
     Random,
     VerticalCircle,
-    Sphere,
+}
+
+/// Range for oscillating parameters
+#[derive(Debug, Clone, Copy)]
+struct ParamValue {
+    min: f32,
+    max: f32,
+}
+
+impl ParamValue {
+    fn new_fixed(value: f32) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    fn new_range(min: f32, max: f32) -> Self {
+        Self { min, max }
+    }
+
+    fn is_oscillating(&self) -> bool {
+        (self.max - self.min).abs() > 1e-6
+    }
+
+    fn get_value(&self, time: f32, speed: f32) -> f32 {
+        if !self.is_oscillating() {
+            return self.min;
+        }
+        let t = (time * speed * 2.0 * PI).sin() * 0.5 + 0.5;
+        self.min + (self.max - self.min) * t
+    }
 }
 
 /// Linkwitz-Riley crossover filter (4th order, -24dB/octave)
@@ -115,69 +146,107 @@ fn normalize_vec3(v: Vec3) -> Vec3 {
     }
 }
 
-/// Position calculator for different movement patterns
+/// Position calculator for different movement patterns with oscillating parameters
 struct PositionCalculator {
     pattern: MovementPattern,
     time: f32,
-    radius: f32,
-    height: f32,
-    speed: f32,
+    start_angle: f32,
+    velocity: ParamValue,
+    velocity_osc_speed: f32,
+    elevation: ParamValue,
+    elevation_osc_speed: f32,
+    distance: ParamValue,
+    distance_osc_speed: f32,
     prev_pos: Vec3,
 }
 
 impl PositionCalculator {
-    fn new(pattern: MovementPattern, radius: f32, height: f32, speed: f32) -> Self {
+    fn new(
+        pattern: MovementPattern,
+        start_angle: f32,
+        velocity: ParamValue,
+        velocity_osc_speed: f32,
+        elevation: ParamValue,
+        elevation_osc_speed: f32,
+        distance: ParamValue,
+        distance_osc_speed: f32,
+    ) -> Self {
         Self {
             pattern,
             time: 0.0,
-            radius,
-            height,
-            speed,
+            start_angle,
+            velocity,
+            velocity_osc_speed,
+            elevation,
+            elevation_osc_speed,
+            distance,
+            distance_osc_speed,
             prev_pos: Vec3::new(0.0, 0.0, 1.0),
         }
     }
 
     fn get_position(&mut self, dt: f32) -> Vec3 {
-        self.time += dt * self.speed;
+        self.time += dt;
+
+        let current_velocity = self.velocity.get_value(self.time, self.velocity_osc_speed);
+        let current_distance = self.distance.get_value(self.time, self.distance_osc_speed);
+        let current_elevation_deg = self
+            .elevation
+            .get_value(self.time, self.elevation_osc_speed);
+        let elevation_rad = current_elevation_deg * PI / 180.0;
 
         let pos = match self.pattern {
             MovementPattern::Circular => {
-                let x = (self.time * 2.0 * PI).cos() * self.radius;
-                let z = (self.time * 2.0 * PI).sin() * self.radius;
-                Vec3::new(x, self.height, z)
+                let angle = self.time * current_velocity * 2.0 * PI + self.start_angle;
+                let x = angle.cos() * current_distance * elevation_rad.cos();
+                let z = angle.sin() * current_distance * elevation_rad.cos();
+                let y = elevation_rad.sin() * current_distance;
+                Vec3::new(x, y, z)
             }
             MovementPattern::Figure8 => {
-                let x = (self.time * PI).cos() * self.radius;
-                let y = (self.time * 2.0 * PI).sin() * self.radius * 0.5;
-                let z = (self.time * PI).sin() * self.radius;
-                Vec3::new(x, y + self.height, z)
+                let angle = self.time * current_velocity * PI + self.start_angle;
+                let x = angle.cos() * current_distance * elevation_rad.cos();
+                let y_pattern =
+                    (self.time * current_velocity * 2.0 * PI).sin() * current_distance * 0.5;
+                let z = angle.sin() * current_distance * elevation_rad.cos();
+                let y = y_pattern + elevation_rad.sin() * current_distance;
+                Vec3::new(x, y, z)
             }
             MovementPattern::Spiral => {
-                let spiral_radius = self.radius * (1.0 - (self.time % 1.0));
-                let angle = self.time * 4.0 * PI;
-                let x = angle.cos() * spiral_radius;
-                let z = angle.sin() * spiral_radius;
-                let y = (self.time * 2.0 * PI).sin() * self.height;
+                // Smooth spiral with many turns - oscillates radius over longer period
+                let spiral_progress = (self.time * current_velocity * 0.1).sin() * 0.5 + 0.5; // Slow oscillation = more turns
+                let spiral_radius = current_distance * (0.2 + 0.8 * spiral_progress); // Keep minimum radius
+                let angle = self.time * current_velocity * 4.0 * PI + self.start_angle;
+                let x = angle.cos() * spiral_radius * elevation_rad.cos();
+                let z = angle.sin() * spiral_radius * elevation_rad.cos();
+                let y = (self.time * current_velocity * 2.0 * PI).sin() * current_distance * 0.5
+                    + elevation_rad.sin() * current_distance;
                 Vec3::new(x, y, z)
             }
             MovementPattern::Random => {
-                let x = (self.time.sin() * 0.7 + (self.time * 3.7).sin() * 0.3) * self.radius;
-                let y = (self.time * 1.3).sin() * self.height;
-                let z = (self.time * 2.1).cos() * self.radius;
+                let t = self.time * current_velocity;
+                let x = (t.sin() * 0.7 + (t * 3.7).sin() * 0.3)
+                    * current_distance
+                    * elevation_rad.cos();
+                let y_pattern = (t * 1.3).sin() * current_distance * 0.5;
+                let z = (t * 2.1).cos() * current_distance * elevation_rad.cos();
+                let y = y_pattern + elevation_rad.sin() * current_distance;
                 Vec3::new(x, y, z)
             }
             MovementPattern::VerticalCircle => {
-                let x = (self.time * 2.0 * PI).sin() * self.radius;
-                let y = (self.time * 2.0 * PI).cos() * self.height;
-                let z = self.radius;
-                Vec3::new(x, y, z)
-            }
-            MovementPattern::Sphere => {
-                let theta = self.time * 2.0 * PI;
-                let phi = (self.time * PI).sin() * PI * 0.5;
-                let x = phi.sin() * theta.cos() * self.radius;
-                let y = phi.cos() * self.height;
-                let z = phi.sin() * theta.sin() * self.radius;
+                // Pure vertical circle that completes based on elevation-osc-speed
+                // Velocity rotates the entire circle plane around the Y-axis
+                let circle_angle =
+                    self.time * self.elevation_osc_speed * 2.0 * PI + self.start_angle;
+
+                // Rotation of the circle plane based on velocity
+                let plane_rotation = self.time * current_velocity * 2.0 * PI;
+
+                // Circle in rotated plane
+                let x = circle_angle.sin() * current_distance * plane_rotation.cos();
+                let y = circle_angle.cos() * current_distance;
+                let z = circle_angle.sin() * current_distance * plane_rotation.sin();
+
                 Vec3::new(x, y, z)
             }
         };
@@ -376,18 +445,53 @@ fn save_stereo_audio(
     Ok(())
 }
 
-fn print_usage() {
+fn parse_range_value(s: &str) -> Result<ParamValue, String> {
+    if s.contains(',') {
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid range format: {}", s));
+        }
+        let min = parts[0]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid number: {}", parts[0]))?;
+        let max = parts[1]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid number: {}", parts[1]))?;
+        Ok(ParamValue::new_range(min, max))
+    } else {
+        let val = s
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid number: {}", s))?;
+        Ok(ParamValue::new_fixed(val))
+    }
+}
+
+fn print_usage(program_name: &str) {
     println!("Binaural 8D Audio Converter");
-    println!(
-        "Usage: {} [options]",
-        env::args().next().unwrap_or_else(|| "program".to_string())
-    );
+    println!("Usage: {} <input_file> [options]", program_name);
+    println!("\nRequired:");
+    println!("  <input_file>              Input mono WAV file");
     println!("\nOptions:");
-    println!("  -i, --input <file>        Input mono WAV file");
-    println!("  -o, --output <file>       Output stereo WAV file");
-    println!("  -p, --pattern <pattern>   Movement pattern (circular, figure8, spiral, random, vertical, sphere)");
-    println!("  -h, --height <value>      Movement height (default: 0.0 for ear level)");
-    println!("  -s, --speed <value>       Movement velocity, can be negative (default: 0.2)");
+    println!("  -o, --output <file>       Output stereo WAV file (default: output_8d.wav)");
+    println!("  -p, --pattern <pattern>   Movement pattern (circular, figure8, spiral, random, vertical)");
+    println!("                            Default: circular");
+    println!("  --start-angle <degrees>   Starting angle in degrees (default: 0)");
+    println!("  --velocity <value|min,max> Movement velocity (default: 0.2)");
+    println!("                            Single value: constant velocity");
+    println!("                            Two values: oscillates between min and max");
+    println!("  --velocity-osc-speed <value> Velocity oscillation speed (default: 0.1)");
+    println!("  --elevation <deg|min,max> Elevation in degrees, -90 to 90 (default: 0)");
+    println!("                            0 = ear level, positive = above, negative = below");
+    println!("                            Single value: constant elevation");
+    println!("                            Two values: oscillates between min and max");
+    println!("  --elevation-osc-speed <value> Elevation oscillation speed (default: 0.1)");
+    println!("  --distance <meters|min,max> Distance/radius in meters (default: 1.0)");
+    println!("                            Single value: constant distance");
+    println!("                            Two values: oscillates between min and max");
+    println!("  --distance-osc-speed <value> Distance oscillation speed (default: 0.1)");
     println!("  --crossover <value>       Crossover frequency in Hz (50-500, default: 200.0)");
     println!("  --bass-boost <value>      Bass boost in decibels (-20.0 to +20.0, default: 0.0)");
     println!("  --help                    Show this help message");
@@ -400,6 +504,20 @@ fn print_usage() {
     println!("                             1.0=wide stereo, 0.5=narrow, 0.0=mono");
     println!("  --reverb-mix <value>       Reverb mix amount (0.0-1.0, default: 0.3)");
     println!("                             0.0=dry, 0.5=equal mix, 1.0=fully wet");
+    println!("\nExamples:");
+    println!("  {} input.wav", program_name);
+    println!(
+        "  {} input.wav -o output.wav --pattern figure8",
+        program_name
+    );
+    println!(
+        "  {} input.wav --velocity 0.1,0.5 --elevation -30,30",
+        program_name
+    );
+    println!(
+        "  {} input.wav --distance 2,4 --start-angle 90",
+        program_name
+    );
     println!("\nNotes:");
     println!("  - Bass frequencies are NOT processed with HRTF (remain centered/omnidirectional)");
     println!("  - Mid/high frequencies receive full 8D spatial processing");
@@ -407,19 +525,27 @@ fn print_usage() {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
+    let program_name = args
+        .get(0)
+        .map(|s| s.as_str())
+        .unwrap_or("<executable_name>");
 
-    if args.contains(&"--help".to_string()) {
-        print_usage();
+    if args.len() < 2 || args.contains(&"--help".to_string()) {
+        print_usage(program_name);
         return Ok(());
     }
 
     let hrir_file = "IRC_1002_C.bin";
-    let mut input_file = "input.wav".to_string();
+    let input_file = args[1].clone();
     let mut output_file = "output_8d.wav".to_string();
     let mut pattern = MovementPattern::Circular;
-    let radius = 1.0;
-    let mut height = 0.0;
-    let mut speed = 0.2;
+    let mut start_angle = 0.0;
+    let mut velocity = ParamValue::new_fixed(0.2);
+    let mut velocity_osc_speed = 0.1;
+    let mut elevation = ParamValue::new_fixed(0.0);
+    let mut elevation_osc_speed = 0.1;
+    let mut distance = ParamValue::new_fixed(1.0);
+    let mut distance_osc_speed = 0.1;
     let mut crossover_freq = 200.0;
     let mut bass_boost_db = 0.0;
     let mut reverb_room_size = 0.5;
@@ -427,13 +553,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reverb_width = 0.9;
     let mut reverb_mix = 0.3;
 
-    let mut i = 1;
+    let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
-            "-i" | "--input" => {
-                input_file = args[i + 1].clone();
-                i += 2;
-            }
             "-o" | "--output" => {
                 output_file = args[i + 1].clone();
                 i += 2;
@@ -445,21 +567,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "spiral" => MovementPattern::Spiral,
                     "random" => MovementPattern::Random,
                     "vertical" => MovementPattern::VerticalCircle,
-                    "sphere" => MovementPattern::Sphere,
                     _ => {
                         eprintln!("Unknown pattern: {}", args[i + 1]);
-                        print_usage();
+                        print_usage(program_name);
                         return Err("Invalid pattern".into());
                     }
                 };
                 i += 2;
             }
-            "-h" | "--height" => {
-                height = args[i + 1].parse().unwrap_or(0.0);
+            "--start-angle" => {
+                start_angle = args[i + 1].parse::<f32>().unwrap_or(0.0) * PI / 180.0;
                 i += 2;
             }
-            "-s" | "--speed" => {
-                speed = args[i + 1].parse().unwrap_or(0.2);
+            "--velocity" => {
+                velocity = parse_range_value(&args[i + 1])?;
+                i += 2;
+            }
+            "--velocity-osc-speed" => {
+                velocity_osc_speed = args[i + 1].parse::<f32>().unwrap_or(0.1);
+                i += 2;
+            }
+            "--elevation" => {
+                let elev = parse_range_value(&args[i + 1])?;
+                elevation =
+                    ParamValue::new_range(elev.min.clamp(-90.0, 90.0), elev.max.clamp(-90.0, 90.0));
+                i += 2;
+            }
+            "--elevation-osc-speed" => {
+                elevation_osc_speed = args[i + 1].parse::<f32>().unwrap_or(0.1);
+                i += 2;
+            }
+            "--distance" => {
+                distance = parse_range_value(&args[i + 1])?;
+                i += 2;
+            }
+            "--distance-osc-speed" => {
+                distance_osc_speed = args[i + 1].parse::<f32>().unwrap_or(0.1);
                 i += 2;
             }
             "--crossover" => {
@@ -491,7 +634,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
-                print_usage();
+                print_usage(program_name);
                 return Err("Invalid argument".into());
             }
         }
@@ -515,10 +658,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Configuration:");
     println!("  Pattern: {:?}", pattern);
-    println!(
-        "  Radius: {:.2}m, Height: {:.2}m, Speed: {:.2}",
-        radius, height, speed
-    );
+    println!("  Start angle: {:.1}°", start_angle * 180.0 / PI);
+
+    if velocity.is_oscillating() {
+        println!(
+            "  Velocity: {:.2} to {:.2} (osc speed: {:.2})",
+            velocity.min, velocity.max, velocity_osc_speed
+        );
+    } else {
+        println!("  Velocity: {:.2}", velocity.min);
+    }
+
+    if elevation.is_oscillating() {
+        println!(
+            "  Elevation: {:.1}° to {:.1}° (osc speed: {:.2})",
+            elevation.min, elevation.max, elevation_osc_speed
+        );
+    } else {
+        println!("  Elevation: {:.1}°", elevation.min);
+    }
+
+    if distance.is_oscillating() {
+        println!(
+            "  Distance: {:.2}m to {:.2}m (osc speed: {:.2})",
+            distance.min, distance.max, distance_osc_speed
+        );
+    } else {
+        println!("  Distance: {:.2}m", distance.min);
+    }
+
     println!("  Crossover frequency: {:.1} Hz", crossover_freq);
     println!("  Bass boost: {:.1} dB", bass_boost_db);
     println!(
@@ -537,7 +705,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bass_boost_db,
     );
 
-    let position_calc = PositionCalculator::new(pattern, radius, height, speed);
+    let position_calc = PositionCalculator::new(
+        pattern,
+        start_angle,
+        velocity,
+        velocity_osc_speed,
+        elevation,
+        elevation_osc_speed,
+        distance,
+        distance_osc_speed,
+    );
+
     let output_samples = processor.process_audio(&input_samples, position_calc);
 
     println!("\n\nNormalizing audio...");
