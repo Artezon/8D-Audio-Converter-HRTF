@@ -257,7 +257,7 @@ fn save_mp3(
     let mut mp3_buffer = Vec::new();
 
     // Encode in chunks using DualPcm
-    const CHUNK_SIZE: usize = 4096;
+    const CHUNK_SIZE: usize = 32768;
     for i in (0..left_channel.len()).step_by(CHUNK_SIZE) {
         let end = (i + CHUNK_SIZE).min(left_channel.len());
         let input = DualPcm {

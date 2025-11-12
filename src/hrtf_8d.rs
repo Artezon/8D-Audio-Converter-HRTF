@@ -1,47 +1,17 @@
 use crate::crossover::LinkwitzRileyCrossover;
 use crate::reverb::ReverbProcessor;
+use crate::ValueOrRange;
+use clap::ValueEnum;
 use hrtf::{HrirSphere, HrtfContext, HrtfProcessor, Vec3};
 use std::f32::consts::PI;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum MovementPattern {
     Circular,
     Figure8,
     Spiral,
     Random,
     VerticalCircle,
-}
-
-/// Range for oscillating parameters
-#[derive(Debug, Clone, Copy)]
-pub struct ParamValue {
-    pub min: f32,
-    pub max: f32,
-}
-
-impl ParamValue {
-    pub fn new_fixed(value: f32) -> Self {
-        Self {
-            min: value,
-            max: value,
-        }
-    }
-
-    pub fn new_range(min: f32, max: f32) -> Self {
-        Self { min, max }
-    }
-
-    pub fn is_oscillating(&self) -> bool {
-        (self.max - self.min).abs() > 1e-6
-    }
-
-    pub fn get_value(&self, time: f32, speed: f32) -> f32 {
-        if !self.is_oscillating() {
-            return self.min;
-        }
-        let t = (time * speed * 2.0 * PI).sin() * 0.5 + 0.5;
-        self.min + (self.max - self.min) * t
-    }
 }
 
 fn normalize_vec3(v: Vec3) -> Vec3 {
@@ -66,11 +36,11 @@ pub struct PositionCalculator {
     pattern: MovementPattern,
     time: f32,
     start_angle: f32,
-    velocity: ParamValue,
+    velocity: ValueOrRange,
     velocity_osc_speed: f32,
-    elevation: ParamValue,
+    elevation: ValueOrRange,
     elevation_osc_speed: f32,
-    distance: ParamValue,
+    distance: ValueOrRange,
     distance_osc_speed: f32,
     prev_pos: Vec3,
     prev_distance: f32,
@@ -80,11 +50,11 @@ impl PositionCalculator {
     pub fn new(
         pattern: MovementPattern,
         start_angle: f32,
-        velocity: ParamValue,
+        velocity: ValueOrRange,
         velocity_osc_speed: f32,
-        elevation: ParamValue,
+        elevation: ValueOrRange,
         elevation_osc_speed: f32,
-        distance: ParamValue,
+        distance: ValueOrRange,
         distance_osc_speed: f32,
     ) -> Self {
         Self {
@@ -98,7 +68,7 @@ impl PositionCalculator {
             distance,
             distance_osc_speed,
             prev_pos: Vec3::new(0.0, 0.0, 1.0),
-            prev_distance: distance.min,
+            prev_distance: distance.from,
         }
     }
 
@@ -182,7 +152,7 @@ impl Audio8DProcessor {
     pub fn new(
         hrir_sphere: HrirSphere,
         sample_rate: u32,
-        crossover_freq: f32,
+        crossover_freq: i32,
         reverb_room_size: f32,
         reverb_dampening: f32,
         reverb_width: f32,
@@ -193,7 +163,7 @@ impl Audio8DProcessor {
         let interpolation_steps = 8;
 
         let hrtf_processor = HrtfProcessor::new(hrir_sphere, interpolation_steps, block_size);
-        let crossover = LinkwitzRileyCrossover::new(sample_rate, crossover_freq);
+        let crossover = LinkwitzRileyCrossover::new(sample_rate, crossover_freq as f32);
         let reverb = ReverbProcessor::new(
             sample_rate,
             reverb_room_size,

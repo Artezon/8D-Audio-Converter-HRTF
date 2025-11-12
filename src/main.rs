@@ -1,7 +1,10 @@
+use clap::Parser;
 use hrtf::HrirSphere;
-use std::env;
 use std::f32::consts::PI;
-use std::path::Path;
+use std::fmt::Display;
+use std::io::Write;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 const HRIR_DATA: &[u8] = include_bytes!("../IRC_1002_C.bin");
 
@@ -12,246 +15,284 @@ mod player;
 mod reverb;
 
 use audio_io::{load_audio, save_audio};
-use hrtf_8d::{Audio8DProcessor, MovementPattern, ParamValue, PositionCalculator};
+use hrtf_8d::{Audio8DProcessor, MovementPattern, PositionCalculator};
 use player::Player;
 
-fn print_usage(program_name: &str) {
-    println!("Usage: {} <input_file> [options]", program_name);
-    println!("\nRequired:");
-    println!("  <input_file>                    Input audio file path");
-    println!("\nOptions:");
-    println!("  -o, --output <file>             Output file path (WAV, FLAC, OGG, MP3)");
-    println!("                                  If not specified, plays audio directly");
-    println!("  -p, --pattern <pattern>         Movement pattern (circular, figure8, spiral, random, vertical)");
-    println!("                                  Default: circular");
-    println!("  -a, --start-angle <degrees>         Starting angle in degrees (default: 0)");
-    println!("  -v, --velocity <value|min,max>      Movement velocity (default: 0.2)");
-    println!("  --velocity-osc-speed <value>    Velocity oscillation speed (default: 0.1)");
-    println!("  -e, --elevation <deg|min,max>       Elevation in degrees, -90 to 90 (default: 0)");
-    println!("  --elevation-osc-speed <value>   Elevation oscillation speed (default: 0.1)");
-    println!("  -d, --distance <meters|min,max>     Distance/radius in meters (default: 1.0)");
-    println!("  --distance-osc-speed <value>    Distance oscillation speed (default: 0.1)");
-    println!(
-        "  --crossover <value>             Crossover frequency in Hz (50-500, default: 200.0)"
-    );
-    println!(
-        "  -b, --bass-boost <value>            Bass boost (-20 dB to +20 dB, default: 0.0 dB)"
-    );
-    println!("\nReverb Options:");
-    println!("  --reverb-room <value>           Room size (0.0-1.0, default: 0.5)");
-    println!("  --reverb-dampening <value>      High-frequency dampening (0.0-1.0, default: 0.5)");
-    println!("  --reverb-width <value>          Stereo width (0.0-1.0, default: 0.9)");
-    println!("  -r, --reverb-mix <value>            Reverb mix amount (0.0-1.0, default: 0.3)");
+#[derive(Parser, Debug)]
+#[command(
+    name = "Binaural 8D Audio Generator",
+    about = "Binaural 8D Audio Generator\n\nGenerate 8D audio with spatial movement and effects",
+    long_about = None,
+    version,
+    author = "Artezon",
+    arg_required_else_help = true
+)]
+struct Args {
+    /// Input audio file path
+    #[arg(value_name = "INPUT_FILE")]
+    input_path: PathBuf,
+
+    /// Output file path (WAV, FLAC, OGG, MP3). If not specified, plays audio directly
+    #[arg(short = 'o', long = "output", value_name = "OUTPUT_FILE")]
+    output_path: Option<PathBuf>,
+
+    /// Movement pattern
+    #[arg(
+        short,
+        long,
+        value_enum,
+        default_value = "circular",
+        help_heading = "Spatial options"
+    )]
+    pattern: MovementPattern,
+
+    /// Starting angle in degrees, 0 - 359
+    #[arg(
+        short = 'a',
+        long = "start-angle",
+        value_name = "DEGREES",
+        default_value = "0.0",
+        help_heading = "Spatial options"
+    )]
+    start_angle: f32,
+
+    /// Movement velocity, 0 - 10 (single value or from,to range)
+    #[arg(
+        short = 'v',
+        long = "velocity",
+        value_name = "VALUE|FROM,TO",
+        default_value = "0.2",
+        help_heading = "Spatial options"
+    )]
+    velocity: ValueOrRange,
+
+    /// Velocity oscillation speed, 0 - 10
+    #[arg(
+        long,
+        value_name = "SPEED",
+        default_value = "0.1",
+        help_heading = "Spatial options"
+    )]
+    velocity_osc_speed: f32,
+
+    /// Elevation in degrees, -90 - 90 (single value or from,to range)
+    #[arg(
+        short = 'e',
+        long = "elevation",
+        value_name = "DEG|FROM,TO",
+        default_value = "0.0",
+        allow_negative_numbers = true,
+        help_heading = "Spatial options"
+    )]
+    elevation: ValueOrRange,
+
+    /// Elevation oscillation speed, 0 - 10
+    #[arg(
+        long,
+        value_name = "SPEED",
+        default_value = "0.1",
+        help_heading = "Spatial options"
+    )]
+    elevation_osc_speed: f32,
+
+    /// Distance/radius in meters, 0.1 - 100 (single value or from,to range)
+    #[arg(
+        short = 'd',
+        long = "distance",
+        value_name = "METERS|FROM,TO",
+        default_value = "1.0",
+        help_heading = "Spatial options"
+    )]
+    distance: ValueOrRange,
+
+    /// Distance oscillation speed, 0 - 10
+    #[arg(
+        long,
+        value_name = "SPEED",
+        default_value = "0.1",
+        help_heading = "Spatial options"
+    )]
+    distance_osc_speed: f32,
+
+    /// Crossover frequency in Hz, 50 - 500
+    #[arg(
+        long,
+        value_name = "FREQUENCY",
+        default_value = "200",
+        help_heading = "Bass options"
+    )]
+    crossover: i32,
+
+    /// Bass boost in dB, -20 - 20
+    #[arg(
+        short = 'b',
+        long = "bass-boost",
+        value_name = "DB",
+        default_value = "0.0",
+        help_heading = "Bass options"
+    )]
+    bass_boost: f32,
+
+    /// Reverb mix amount, 0.0 - 1.0
+    #[arg(
+        short = 'r',
+        long = "reverb-mix",
+        value_name = "VALUE",
+        default_value = "0.3",
+        help_heading = "Reverb options"
+    )]
+    reverb_mix: f32,
+
+    /// Reverb room size, 0.0 - 1.0
+    #[arg(long, default_value = "0.5", help_heading = "Reverb options")]
+    reverb_room: f32,
+
+    /// Reverb high-frequency dampening, 0.0 - 1.0
+    #[arg(long, default_value = "0.5", help_heading = "Reverb options")]
+    reverb_dampening: f32,
+
+    /// Reverb stereo width, 0.0 - 1.0
+    #[arg(long, default_value = "0.9", help_heading = "Reverb options")]
+    reverb_width: f32,
 }
 
-pub fn parse_range_value(s: &str) -> Result<ParamValue, String> {
-    if s.contains(',') {
-        let parts: Vec<&str> = s.split(',').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid range format: {}", s));
+/// Range for oscillating parameters
+#[derive(Debug, Clone, Copy)]
+struct ValueOrRange {
+    from: f32,
+    to: f32,
+}
+
+impl ValueOrRange {
+    fn new_fixed(value: f32) -> Self {
+        Self {
+            from: value,
+            to: value,
         }
-        let min = parts[0]
-            .trim()
-            .parse::<f32>()
-            .map_err(|_| format!("Invalid number: {}", parts[0]))?;
-        let max = parts[1]
-            .trim()
-            .parse::<f32>()
-            .map_err(|_| format!("Invalid number: {}", parts[1]))?;
-        Ok(ParamValue::new_range(min, max))
-    } else {
-        let val = s
-            .trim()
-            .parse::<f32>()
-            .map_err(|_| format!("Invalid number: {}", s))?;
-        Ok(ParamValue::new_fixed(val))
+    }
+
+    fn new_range(mut from: f32, mut to: f32) -> Self {
+        if from > to {
+            (from, to) = (to, from);
+        }
+        Self { from, to }
+    }
+
+    fn is_oscillating(&self) -> bool {
+        (self.to - self.from).abs() > 1e-6
+    }
+
+    fn get_value(&self, time: f32, speed: f32) -> f32 {
+        if !self.is_oscillating() {
+            return self.from;
+        }
+        let t = (time * speed * 2.0 * PI).sin() * 0.5 + 0.5;
+        self.from + (self.to - self.from) * t
+    }
+}
+
+impl FromStr for ValueOrRange {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains(',') {
+            let parts: Vec<&str> = s.split(',').collect();
+            if parts.len() != 2 {
+                return Err(format!("Invalid range format: {}", s));
+            }
+            let from = parts[0]
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("Invalid number: {}", parts[0]))?;
+            let to = parts[1]
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("Invalid number: {}", parts[1]))?;
+            Ok(ValueOrRange::new_range(from, to))
+        } else {
+            let val = s
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("Invalid number: {}", s))?;
+            Ok(ValueOrRange::new_fixed(val))
+        }
+    }
+}
+
+trait IsInRangeCheck<T> {
+    fn check_range(&self, min: T, max: T, value_name: Option<&str>) -> Result<(), String>;
+}
+
+impl<T: PartialOrd + Copy + Display> IsInRangeCheck<T> for T {
+    fn check_range(&self, min: T, max: T, value_name: Option<&str>) -> Result<(), String> {
+        let name = value_name.unwrap_or("Value");
+
+        if *self >= min && *self <= max {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} must be in range {} to {}, got {}",
+                name, min, max, *self
+            ))
+        }
+    }
+}
+
+impl IsInRangeCheck<f32> for ValueOrRange {
+    fn check_range(&self, min: f32, max: f32, value_name: Option<&str>) -> Result<(), String> {
+        let name = value_name.unwrap_or("Value");
+
+        if self.from >= min && self.from <= max && self.to >= min && self.to <= max {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} range ({} to {}) must be within {} to {}",
+                name, self.from, self.to, min, max
+            ))
+        }
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    args.start_angle
+        .check_range(0.0, 359.0, Some("Start angle"))?;
+    args.velocity.check_range(0.0, 10.0, Some("Velocity"))?;
+    args.velocity_osc_speed
+        .check_range(0.0, 10.0, Some("Velocity oscillation speed"))?;
+    args.elevation.check_range(-90.0, 90.0, Some("Elevation"))?;
+    args.elevation_osc_speed
+        .check_range(0.0, 10.0, Some("Elevation oscillation speed"))?;
+    args.distance.check_range(0.1, 100.0, Some("Distance"))?;
+    args.distance_osc_speed
+        .check_range(0.0, 10.0, Some("Distance oscillation speed"))?;
+    args.crossover.check_range(50, 500, Some("Crossover"))?;
+    args.bass_boost
+        .check_range(-20.0, 20.0, Some("Bass boost"))?;
+    args.reverb_mix.check_range(0.0, 1.0, Some("Reverb mix"))?;
+    args.reverb_room
+        .check_range(0.0, 1.0, Some("Reverb room size"))?;
+    args.reverb_dampening
+        .check_range(0.0, 1.0, Some("Reverb dampening"))?;
+    args.reverb_width
+        .check_range(0.0, 1.0, Some("Reverb width"))?;
+
     println!("Binaural 8D Audio Generator\n");
 
-    let args: Vec<String> = env::args().collect();
-    let program_name = args.get(0).map(|s| s.as_str()).unwrap_or("<executable>");
-
-    if args.len() < 2 || args.contains(&"--help".to_string()) {
-        print_usage(program_name);
-        return Ok(());
-    }
-
-    let input_file = args[1].clone();
-    let mut output_file: Option<String> = None;
-    let mut pattern = MovementPattern::Circular;
-    let mut start_angle = 0.0;
-    let mut velocity = ParamValue::new_fixed(0.2);
-    let mut velocity_osc_speed = 0.1;
-    let mut elevation = ParamValue::new_fixed(0.0);
-    let mut elevation_osc_speed = 0.1;
-    let mut distance = ParamValue::new_fixed(1.0);
-    let mut distance_osc_speed = 0.1;
-    let mut crossover_freq = 200.0;
-    let mut bass_boost_db = 0.0;
-    let mut reverb_room_size = 0.5;
-    let mut reverb_dampening = 0.5;
-    let mut reverb_width = 0.9;
-    let mut reverb_mix = 0.3;
-
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-o" | "--output" => {
-                if i + 1 >= args.len() {
-                    return Err(format!(
-                        "Flag '{}' requires a value. Usage: {} <input_file> -o <output_file>",
-                        args[i], program_name
-                    )
-                    .into());
-                }
-                output_file = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "-p" | "--pattern" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Available patterns: circular, figure8, spiral, random, vertical", args[i]).into());
-                }
-                pattern = match args[i + 1].to_lowercase().as_str() {
-                    "circular" => MovementPattern::Circular,
-                    "figure8" => MovementPattern::Figure8,
-                    "spiral" => MovementPattern::Spiral,
-                    "random" => MovementPattern::Random,
-                    "vertical" => MovementPattern::VerticalCircle,
-                    _ => {
-                        eprintln!("Unknown pattern: {}", args[i + 1]);
-                        return Err("Invalid pattern".into());
-                    }
-                };
-                i += 2;
-            }
-            "--start-angle" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --start-angle <degrees>", args[i], program_name).into());
-                }
-                start_angle = args[i + 1].parse::<f32>().unwrap_or(0.0) * PI / 180.0;
-                i += 2;
-            }
-            "--velocity" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --velocity <value|min,max>", args[i], program_name).into());
-                }
-                velocity = parse_range_value(&args[i + 1])?;
-                i += 2;
-            }
-            "--velocity-osc-speed" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --velocity-osc-speed <value>", args[i], program_name).into());
-                }
-                velocity_osc_speed = args[i + 1].parse::<f32>().unwrap_or(0.1);
-                i += 2;
-            }
-            "--elevation" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --elevation <deg|min,max>", args[i], program_name).into());
-                }
-                let elev = parse_range_value(&args[i + 1])?;
-                elevation =
-                    ParamValue::new_range(elev.min.clamp(-90.0, 90.0), elev.max.clamp(-90.0, 90.0));
-                i += 2;
-            }
-            "--elevation-osc-speed" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --elevation-osc-speed <value>", args[i], program_name).into());
-                }
-                elevation_osc_speed = args[i + 1].parse::<f32>().unwrap_or(0.1);
-                i += 2;
-            }
-            "--distance" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --distance <meters|min,max>", args[i], program_name).into());
-                }
-                distance = parse_range_value(&args[i + 1])?;
-                i += 2;
-            }
-            "--distance-osc-speed" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --distance-osc-speed <value>", args[i], program_name).into());
-                }
-                distance_osc_speed = args[i + 1].parse::<f32>().unwrap_or(0.1);
-                i += 2;
-            }
-            "--crossover" => {
-                if i + 1 >= args.len() {
-                    return Err(format!(
-                        "Flag '{}' requires a value. Usage: {} <input_file> --crossover <Hz>",
-                        args[i], program_name
-                    )
-                    .into());
-                }
-                crossover_freq = args[i + 1]
-                    .parse::<f32>()
-                    .unwrap_or(200.0)
-                    .clamp(50.0, 500.0);
-                i += 2;
-            }
-            "--bass-boost" => {
-                if i + 1 >= args.len() {
-                    return Err(format!(
-                        "Flag '{}' requires a value. Usage: {} <input_file> --bass-boost <dB>",
-                        args[i], program_name
-                    )
-                    .into());
-                }
-                bass_boost_db = args[i + 1].parse::<f32>().unwrap_or(0.0).clamp(-20.0, 20.0);
-                i += 2;
-            }
-            "--reverb-room" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --reverb-room <0.0-1.0>", args[i], program_name).into());
-                }
-                reverb_room_size = args[i + 1].parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0);
-                i += 2;
-            }
-            "--reverb-dampening" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --reverb-dampening <0.0-1.0>", args[i], program_name).into());
-                }
-                reverb_dampening = args[i + 1].parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0);
-                i += 2;
-            }
-            "--reverb-width" => {
-                if i + 1 >= args.len() {
-                    return Err(format!("Flag '{}' requires a value. Usage: {} <input_file> --reverb-width <0.0-1.0>", args[i], program_name).into());
-                }
-                reverb_width = args[i + 1].parse::<f32>().unwrap_or(0.9).clamp(0.0, 1.0);
-                i += 2;
-            }
-            "--reverb-mix" => {
-                if i + 1 >= args.len() {
-                    return Err(format!(
-                        "Flag '{}' requires a value. Usage: {} <input_file> --reverb-mix <0.0-1.0>",
-                        args[i], program_name
-                    )
-                    .into());
-                }
-                reverb_mix = args[i + 1].parse::<f32>().unwrap_or(0.3).clamp(0.0, 1.0);
-                i += 2;
-            }
-            _ => {
-                eprintln!("Unknown argument: {}", args[i]);
-                return Err("Invalid argument".into());
-            }
-        }
-    }
-
     // Check output path if specified
-    if let Some(ref output_path) = output_file {
+    if let Some(ref output_path) = args.output_path {
         // Check if extension is valid by calling from_path
-        audio_io::OutputFormat::from_path(Path::new(output_path))?;
+        audio_io::OutputFormat::from_path(output_path)?;
 
         // Check if file already exists
-        if Path::new(output_path).exists() {
-            println!("Warning: Output file '{}' already exists.", output_path);
+        if output_path.exists() {
+            println!(
+                "Warning: Output file '{}' already exists.",
+                output_path.display()
+            );
             print!("Do you want to overwrite it? (y/n): ");
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::io::stdout().flush().unwrap();
 
             let mut response = String::new();
             std::io::stdin().read_line(&mut response)?;
@@ -263,77 +304,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Check if parent directory exists
-        if let Some(parent) = Path::new(output_path).parent() {
+        if let Some(parent) = output_path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 return Err(format!("Output directory does not exist: {:?}", parent).into());
             }
         }
     }
 
-    println!("Loading input audio: {}", input_file);
-    let input_samples = load_audio(Path::new(&input_file))?;
+    println!("Loading audio: {}", args.input_path.display());
+    let input_samples = load_audio(&args.input_path)?;
 
     let hrir_sphere = HrirSphere::new(HRIR_DATA, 44100)
         .map_err(|e| format!("Failed to load HRIR sphere: {:?}", e))?;
 
+    let pattern: MovementPattern = args.pattern.into();
+    let start_angle = args.start_angle * PI / 180.0;
+
     println!("Configuration:");
     println!("  Pattern: {:?}", pattern);
-    println!("  Start angle: {:.1}°", start_angle * 180.0 / PI);
+    println!("  Start angle: {:.1}°", args.start_angle);
 
-    if velocity.is_oscillating() {
+    if args.velocity.is_oscillating() {
         println!(
             "  Velocity: {:.2} to {:.2} (osc speed: {:.2})",
-            velocity.min, velocity.max, velocity_osc_speed
+            args.velocity.from, args.velocity.to, args.velocity_osc_speed
         );
     } else {
-        println!("  Velocity: {:.2}", velocity.min);
+        println!("  Velocity: {:.2}", args.velocity.from);
     }
 
-    if elevation.is_oscillating() {
+    if args.elevation.is_oscillating() {
         println!(
             "  Elevation: {:.1}° to {:.1}° (osc speed: {:.2})",
-            elevation.min, elevation.max, elevation_osc_speed
+            args.elevation.from, args.elevation.to, args.elevation_osc_speed
         );
     } else {
-        println!("  Elevation: {:.1}°", elevation.min);
+        println!("  Elevation: {:.1}°", args.elevation.from);
     }
 
-    if distance.is_oscillating() {
+    if args.distance.is_oscillating() {
         println!(
             "  Distance: {:.2}m to {:.2}m (osc speed: {:.2})",
-            distance.min, distance.max, distance_osc_speed
+            args.distance.from, args.distance.to, args.distance_osc_speed
         );
     } else {
-        println!("  Distance: {:.2}m", distance.min);
+        println!("  Distance: {:.2}m", args.distance.from);
     }
 
-    println!("  Crossover frequency: {:.1} Hz", crossover_freq);
-    println!("  Bass boost: {:.1} dB", bass_boost_db);
+    println!("  Crossover frequency: {} Hz", args.crossover);
+    println!("  Bass boost: {:.1} dB", args.bass_boost);
     println!(
-        "  Reverb room: {:.2}, mix: {:.2}\n",
-        reverb_room_size, reverb_mix
+        "  Reverb mix: {:.2}, room size: {:.2}, dampening: {:.2}, stereo width: {:.2}\n",
+        args.reverb_mix, args.reverb_room, args.reverb_dampening, args.reverb_width
     );
 
     let position_calc = PositionCalculator::new(
         pattern,
         start_angle,
-        velocity,
-        velocity_osc_speed,
-        elevation,
-        elevation_osc_speed,
-        distance,
-        distance_osc_speed,
+        args.velocity,
+        args.velocity_osc_speed,
+        args.elevation,
+        args.elevation_osc_speed,
+        args.distance,
+        args.distance_osc_speed,
     );
 
     let mut processor = Audio8DProcessor::new(
         hrir_sphere,
         44100,
-        crossover_freq,
-        reverb_room_size,
-        reverb_dampening,
-        reverb_width,
-        reverb_mix,
-        bass_boost_db,
+        args.crossover,
+        args.reverb_room,
+        args.reverb_dampening,
+        args.reverb_width,
+        args.reverb_mix,
+        args.bass_boost,
     );
 
     let output_samples = processor.process_audio(
@@ -341,7 +385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position_calc,
         Some(&|progress| {
             print!("\rProcessing: {}%", (progress * 100.0) as u32);
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::io::stdout().flush().unwrap();
         }),
     );
 
@@ -364,14 +408,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_samples
     };
 
-    if let Some(output_path) = output_file {
+    if let Some(output_path) = args.output_path {
         // File output mode
-        println!("Saving output to: {}", output_path);
-        save_audio(Path::new(&output_path), &normalized_output, 44100)?;
+        println!("Saving output to: {}", output_path.display());
+        save_audio(&output_path, &normalized_output, 44100)?;
         println!("File saved successfully!");
+        println!("\nNOTE: You need headphones for the true 8D listening experience.");
     } else {
         // Real-time playback mode
-        let player = Player::new(normalized_output)?;
+        println!("NOTE: You need headphones for the true 8D listening experience.\n");
+        let mut player = Player::new(normalized_output)?;
         player.play()?;
     }
 

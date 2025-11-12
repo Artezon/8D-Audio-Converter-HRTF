@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4.5.51", features = ["derive"] }
 hrtf = "0.8.1"
 biquad = "0.5"
 freeverb = "0.1"
@@ -18,3 +19,7 @@ rodio = "0.21.1"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[[bin]]
+name = "make8d"
+path = "src/main.rs"

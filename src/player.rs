@@ -1,4 +1,5 @@
-use rodio::{Sink, Source};
+use rodio::{OutputStreamBuilder, Sink, Source};
+use std::io::Write;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -15,76 +16,62 @@ impl Player {
         Ok(Self { output_samples })
     }
 
-    pub fn play(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Get default audio output
-        let stream = rodio::OutputStreamBuilder::open_default_stream()?;
+        let mut stream = OutputStreamBuilder::open_default_stream()?;
+        stream.log_on_drop(false);
         let sink = Arc::new(Sink::connect_new(stream.mixer())); // Wrap in Arc for thread-safe sharing
 
-        // Create audio source from processed samples
-        let source = StereoSampleSource::new(self.output_samples.clone(), 44100);
-
-        // Current position tracking
+        // Position tracking using a shared atomic counter
         let current_sample = Arc::new(AtomicUsize::new(0));
+        let current_sample_clone = Arc::clone(&current_sample);
         let total_samples = self.output_samples.len();
 
-        // Update thread for display
-        let current_sample_clone = current_sample.clone();
+        // Create audio source from processed samples
+        let source = StereoSampleSource::new(self.output_samples.clone(), 44100, current_sample);
+
         let total_duration = Duration::from_secs_f64(total_samples as f64 / 44100.0);
+
+        // Playback progress thread
         thread::spawn(move || loop {
             let pos = current_sample_clone.load(Ordering::Relaxed);
             if pos >= total_samples {
                 break;
             }
-
             let current_pos_duration = Duration::from_secs_f64(pos as f64 / 44100.0);
-
             print!(
-                "Playing... {:02}:{:02} / {:02}:{:02}. Press Ctrl+C to stop\r",
+                "\rPlaying... {:02}:{:02} / {:02}:{:02}. Press Ctrl+C to stop",
                 current_pos_duration.as_secs() / 60,
                 current_pos_duration.as_secs() % 60,
                 total_duration.as_secs() / 60,
                 total_duration.as_secs() % 60
             );
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
-
+            std::io::stdout().flush().unwrap();
             thread::sleep(Duration::from_millis(100));
         });
 
-        // Create source with position tracking
-        let tracked_source = source.track_position(current_sample);
-
-        // Add to sink and play
-        sink.append(tracked_source);
-
-        // Wait for playback to complete
+        sink.append(source);
         sink.sleep_until_end();
 
         println!("\n\nPlayback finished!");
-
         Ok(())
     }
 }
 
-// Stereo audio source implementation
 struct StereoSampleSource {
     samples: Vec<(f32, f32)>,
     position: usize,
     sample_rate: u32,
+    current_sample: Arc<AtomicUsize>,
 }
 
 impl StereoSampleSource {
-    fn new(samples: Vec<(f32, f32)>, sample_rate: u32) -> Self {
+    fn new(samples: Vec<(f32, f32)>, sample_rate: u32, current_sample: Arc<AtomicUsize>) -> Self {
         Self {
             samples,
             position: 0,
             sample_rate,
-        }
-    }
-
-    fn track_position(self, counter: Arc<AtomicUsize>) -> TrackedSource {
-        TrackedSource {
-            source: self,
-            counter,
+            current_sample,
         }
     }
 }
@@ -100,6 +87,10 @@ impl Iterator for StereoSampleSource {
         let sample_idx = self.position / 2;
         let channel = self.position % 2;
         self.position += 1;
+
+        if channel == 1 {
+            self.current_sample.store(sample_idx + 1, Ordering::Relaxed);
+        }
 
         let (left, right) = self.samples[sample_idx];
         Some(if channel == 0 { left } else { right })
@@ -120,45 +111,7 @@ impl Source for StereoSampleSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        let total_samples = self.samples.len() as u64;
-        let duration_secs = total_samples as f64 / self.sample_rate as f64;
+        let duration_secs = self.samples.len() as f64 / self.sample_rate as f64;
         Some(Duration::from_secs_f64(duration_secs))
-    }
-}
-
-// Wrapper to track playback position
-struct TrackedSource {
-    source: StereoSampleSource,
-    counter: Arc<AtomicUsize>,
-}
-
-impl Iterator for TrackedSource {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = self.source.next();
-        if result.is_some() {
-            let sample_idx = self.source.position / 2;
-            self.counter.store(sample_idx, Ordering::Relaxed);
-        }
-        result
-    }
-}
-
-impl Source for TrackedSource {
-    fn current_span_len(&self) -> Option<usize> {
-        self.source.current_span_len()
-    }
-
-    fn channels(&self) -> u16 {
-        self.source.channels()
-    }
-
-    fn sample_rate(&self) -> u32 {
-        self.source.sample_rate()
-    }
-
-    fn total_duration(&self) -> Option<Duration> {
-        self.source.total_duration()
     }
 }
