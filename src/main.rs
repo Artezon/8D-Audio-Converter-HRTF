@@ -51,17 +51,18 @@ struct Args {
         short = 'a',
         long = "start-angle",
         value_name = "DEGREES",
-        default_value = "0.0",
+        default_value = "0",
         help_heading = "Spatial options"
     )]
     start_angle: f32,
 
-    /// Movement velocity, 0 - 10 (single value or from,to range)
+    /// Rotation velocity, -100 - 100 RPM, positive - clockwise, negative - counterclockwise (single value or from,to range)
     #[arg(
         short = 'v',
         long = "velocity",
-        value_name = "VALUE|FROM,TO",
-        default_value = "0.2",
+        value_name = "RPM|FROM,TO",
+        default_value = "15",
+        allow_hyphen_values = true,
         help_heading = "Spatial options"
     )]
     velocity: ValueOrRange,
@@ -70,7 +71,7 @@ struct Args {
     #[arg(
         long,
         value_name = "SPEED",
-        default_value = "0.1",
+        default_value = "5",
         help_heading = "Spatial options"
     )]
     velocity_osc_speed: f32,
@@ -80,8 +81,8 @@ struct Args {
         short = 'e',
         long = "elevation",
         value_name = "DEG|FROM,TO",
-        default_value = "0.0",
-        allow_negative_numbers = true,
+        default_value = "0",
+        allow_hyphen_values = true,
         help_heading = "Spatial options"
     )]
     elevation: ValueOrRange,
@@ -90,7 +91,7 @@ struct Args {
     #[arg(
         long,
         value_name = "SPEED",
-        default_value = "0.1",
+        default_value = "5",
         help_heading = "Spatial options"
     )]
     elevation_osc_speed: f32,
@@ -100,7 +101,7 @@ struct Args {
         short = 'd',
         long = "distance",
         value_name = "METERS|FROM,TO",
-        default_value = "1.0",
+        default_value = "1",
         help_heading = "Spatial options"
     )]
     distance: ValueOrRange,
@@ -114,6 +115,16 @@ struct Args {
     )]
     distance_osc_speed: f32,
 
+    /// Bass boost in dB, -20 - 20
+    #[arg(
+        short = 'b',
+        long = "bass-boost",
+        value_name = "DB",
+        default_value = "0",
+        help_heading = "Bass options"
+    )]
+    bass_boost: f32,
+
     /// Crossover frequency in Hz, 50 - 500
     #[arg(
         long,
@@ -122,16 +133,6 @@ struct Args {
         help_heading = "Bass options"
     )]
     crossover: i32,
-
-    /// Bass boost in dB, -20 - 20
-    #[arg(
-        short = 'b',
-        long = "bass-boost",
-        value_name = "DB",
-        default_value = "0.0",
-        help_heading = "Bass options"
-    )]
-    bass_boost: f32,
 
     /// Reverb mix amount, 0.0 - 1.0
     #[arg(
@@ -186,8 +187,14 @@ impl ValueOrRange {
         if !self.is_oscillating() {
             return self.from;
         }
-        let t = (time * speed * 2.0 * PI).sin() * 0.5 + 0.5;
-        self.from + (self.to - self.from) * t
+
+        let range = self.to - self.from;
+        let period = range / speed;
+
+        let phase = (time / period) % 2.0;
+        let t = if phase < 1.0 { phase } else { 2.0 - phase };
+
+        self.from + range * t
     }
 }
 
@@ -258,13 +265,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     args.start_angle
         .check_range(0.0, 359.0, Some("Start angle"))?;
-    args.velocity.check_range(0.0, 10.0, Some("Velocity"))?;
+    args.velocity
+        .check_range(-100.0, 100.0, Some("Rotation velocity (RPM)"))?;
     args.velocity_osc_speed
         .check_range(0.0, 10.0, Some("Velocity oscillation speed"))?;
-    args.elevation.check_range(-90.0, 90.0, Some("Elevation"))?;
+    args.elevation
+        .check_range(-90.0, 90.0, Some("Elevation angle"))?;
     args.elevation_osc_speed
         .check_range(0.0, 10.0, Some("Elevation oscillation speed"))?;
-    args.distance.check_range(0.1, 100.0, Some("Distance"))?;
+    args.distance
+        .check_range(0.1, 100.0, Some("Distance in meters"))?;
     args.distance_osc_speed
         .check_range(0.0, 10.0, Some("Distance oscillation speed"))?;
     args.crossover.check_range(50, 500, Some("Crossover"))?;

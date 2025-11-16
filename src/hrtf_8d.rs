@@ -3,15 +3,15 @@ use crate::reverb::ReverbProcessor;
 use crate::ValueOrRange;
 use clap::ValueEnum;
 use hrtf::{HrirSphere, HrtfContext, HrtfProcessor, Vec3};
-use std::f32::consts::PI;
+use std::f32::consts::TAU;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum MovementPattern {
     Circular,
     Figure8,
-    Spiral,
-    Random,
     VerticalCircle,
+    Helix,
+    Random,
 }
 
 fn normalize_vec3(v: Vec3) -> Vec3 {
@@ -35,13 +35,13 @@ fn calculate_distance_gain(distance: f32) -> f32 {
 pub struct PositionCalculator {
     pattern: MovementPattern,
     time: f32,
-    start_angle: f32,
     velocity: ValueOrRange,
     velocity_osc_speed: f32,
     elevation: ValueOrRange,
     elevation_osc_speed: f32,
     distance: ValueOrRange,
     distance_osc_speed: f32,
+    angle: f32,
     prev_pos: Vec3,
     prev_distance: f32,
 }
@@ -60,13 +60,13 @@ impl PositionCalculator {
         Self {
             pattern,
             time: 0.0,
-            start_angle,
             velocity,
             velocity_osc_speed,
             elevation,
             elevation_osc_speed,
             distance,
             distance_osc_speed,
+            angle: start_angle.to_radians(),
             prev_pos: Vec3::new(0.0, 0.0, 1.0),
             prev_distance: distance.from,
         }
@@ -75,65 +75,64 @@ impl PositionCalculator {
     pub fn get_position(&mut self, dt: f32) -> (Vec3, f32) {
         self.time += dt;
 
-        let current_velocity = self.velocity.get_value(self.time, self.velocity_osc_speed);
-        let current_distance = self.distance.get_value(self.time, self.distance_osc_speed);
-        let current_elevation_deg = self
+        // Oscillating values
+        let velocity = self.velocity.get_value(self.time, self.velocity_osc_speed) / 60.0;
+        let distance = self.distance.get_value(self.time, self.distance_osc_speed);
+        let elevation = self
             .elevation
-            .get_value(self.time, self.elevation_osc_speed);
-        let current_elevation_rad = current_elevation_deg * PI / 180.0;
+            .get_value(self.time, self.elevation_osc_speed)
+            .to_radians();
 
-        let current_pos = match self.pattern {
+        self.angle += velocity * dt * TAU;
+
+        let pos = match self.pattern {
             MovementPattern::Circular => {
-                let angle = self.time * current_velocity * 2.0 * PI + self.start_angle;
-                let x = angle.cos() * current_distance * current_elevation_rad.cos();
-                let z = angle.sin() * current_distance * current_elevation_rad.cos();
-                let y = current_elevation_rad.sin() * current_distance;
+                let x = self.angle.cos();
+                let y = elevation.sin();
+                let z = self.angle.sin();
                 Vec3::new(x, y, z)
             }
             MovementPattern::Figure8 => {
-                let angle = self.time * current_velocity * PI + self.start_angle;
-                let x = angle.cos() * current_distance * current_elevation_rad.cos();
-                let y_pattern =
-                    (self.time * current_velocity * 2.0 * PI).sin() * current_distance * 0.5;
-                let z = angle.sin() * current_distance * current_elevation_rad.cos();
-                let y = y_pattern + current_elevation_rad.sin() * current_distance;
-                Vec3::new(x, y, z)
-            }
-            MovementPattern::Spiral => {
-                let spiral_progress = (self.time * current_velocity * 0.1).sin() * 0.5 + 0.5;
-                let spiral_radius = current_distance * (0.2 + 0.8 * spiral_progress);
-                let angle = self.time * current_velocity * 4.0 * PI + self.start_angle;
-                let x = angle.cos() * spiral_radius * current_elevation_rad.cos();
-                let z = angle.sin() * spiral_radius * current_elevation_rad.cos();
-                let y = (self.time * current_velocity * 2.0 * PI).sin() * current_distance * 0.5
-                    + current_elevation_rad.sin() * current_distance;
-                Vec3::new(x, y, z)
-            }
-            MovementPattern::Random => {
-                let t = self.time * current_velocity;
-                let x = (t.sin() * 0.7 + (t * 3.7).sin() * 0.3)
-                    * current_distance
-                    * current_elevation_rad.cos();
-                let y_pattern = (t * 1.3).sin() * current_distance * 0.5;
-                let z = (t * 2.1).cos() * current_distance * current_elevation_rad.cos();
-                let y = y_pattern + current_elevation_rad.sin() * current_distance;
+                let x = self.angle.cos();
+                let y = (self.angle * 2.0).sin() * 0.5;
+                let z = self.angle.sin();
                 Vec3::new(x, y, z)
             }
             MovementPattern::VerticalCircle => {
-                let circle_angle =
-                    self.time * self.elevation_osc_speed * 2.0 * PI + self.start_angle;
-                let plane_rotation = self.time * current_velocity * 2.0 * PI;
-                let x = circle_angle.sin() * current_distance * plane_rotation.cos();
-                let y = circle_angle.cos() * current_distance;
-                let z = circle_angle.sin() * current_distance * plane_rotation.sin();
+                let plane_rotation = elevation;
+                let x = self.angle.sin() * plane_rotation.cos();
+                let y = self.angle.cos();
+                let z = self.angle.sin() * plane_rotation.sin();
+                Vec3::new(x, y, z)
+            }
+            MovementPattern::Helix => {
+                let y_progress = (self.angle / 5.0 / TAU) % 1.0; // 0 to 1 for each rotation
+
+                // Oscillate back and forth using triangle wave
+                let (y, direction) = if (y_progress * 2.0) as i32 % 2 == 0 {
+                    (-1.0 + (y_progress % 0.5) * 4.0, 1.0) // Going up: -1 to 1
+                } else {
+                    (1.0 - ((y_progress - 0.5) % 0.5) * 4.0, -1.0) // Going down: 1 to -1
+                };
+
+                let angle = self.angle * direction;
+                let x = angle.cos();
+                let z = angle.sin();
+                Vec3::new(x, y, z)
+            }
+            MovementPattern::Random => {
+                let t = self.time * velocity;
+                let x = t.sin() * 0.7 + (t * 3.7).sin() * 0.3;
+                let y = (t * 1.3).sin() * 0.5;
+                let z = (t * 2.1).cos();
                 Vec3::new(x, y, z)
             }
         };
 
-        self.prev_pos = current_pos;
-        self.prev_distance = current_distance;
+        self.prev_pos = pos;
+        self.prev_distance = distance;
 
-        (current_pos, current_distance)
+        (pos, distance)
     }
 }
 
