@@ -1,6 +1,7 @@
 use crate::crossover::LinkwitzRileyCrossover;
 use crate::reverb::ReverbProcessor;
 use crate::ValueOrRange;
+use biquad::*;
 use clap::ValueEnum;
 use hrtf::{HrirSphere, HrtfContext, HrtfProcessor, Vec3};
 use std::f32::consts::TAU;
@@ -141,17 +142,17 @@ pub struct Audio8DProcessor {
     hrtf_processor: HrtfProcessor,
     sample_rate: u32,
     block_size: usize,
-    crossover: LinkwitzRileyCrossover,
+    crossover_left: LinkwitzRileyCrossover,
+    crossover_right: LinkwitzRileyCrossover,
     reverb: ReverbProcessor,
     reverb_mix: f32,
-    bass_boost_gain: f32,
+    low_shelf: DirectForm2Transposed<f32>,
 }
 
 impl Audio8DProcessor {
     pub fn new(
         hrir_sphere: HrirSphere,
         sample_rate: u32,
-        crossover_freq: i32,
         reverb_room_size: f32,
         reverb_dampening: f32,
         reverb_width: f32,
@@ -162,7 +163,8 @@ impl Audio8DProcessor {
         let interpolation_steps = 8;
 
         let hrtf_processor = HrtfProcessor::new(hrir_sphere, interpolation_steps, block_size);
-        let crossover = LinkwitzRileyCrossover::new(sample_rate, crossover_freq as f32);
+        let crossover_left = LinkwitzRileyCrossover::new(sample_rate, 80.0);
+        let crossover_right = LinkwitzRileyCrossover::new(sample_rate, 80.0);
         let reverb = ReverbProcessor::new(
             sample_rate,
             reverb_room_size,
@@ -170,20 +172,30 @@ impl Audio8DProcessor {
             reverb_width,
         );
 
+        let shelf_coeffs = Coefficients::<f32>::from_params(
+            Type::LowShelf(bass_boost_db),
+            sample_rate.hz(),
+            150.0.hz(),
+            Q_BUTTERWORTH_F32,
+        )
+        .expect("Invalid low-shelf parameters");
+        let low_shelf = DirectForm2Transposed::<f32>::new(shelf_coeffs);
+
         Self {
             hrtf_processor,
             sample_rate,
             block_size,
-            crossover,
+            crossover_left,
+            crossover_right,
             reverb,
             reverb_mix,
-            bass_boost_gain: 10.0f32.powf(bass_boost_db / 20.0),
+            low_shelf,
         }
     }
 
     pub fn process_audio(
         &mut self,
-        input_samples: &[f32],
+        input_samples: &[(f32, f32)],
         mut position_calc: PositionCalculator,
         progress_callback: Option<&dyn Fn(f32)>,
     ) -> Vec<(f32, f32)> {
@@ -194,8 +206,10 @@ impl Audio8DProcessor {
         let total_samples = input_samples.len();
         let mut output = vec![(0.0, 0.0); total_samples];
 
-        self.crossover.reset();
-        self.reverb.reset();
+        self.crossover_left.reset_state();
+        self.crossover_right.reset_state();
+        self.reverb.reset_state();
+        self.low_shelf.reset_state();
 
         let mut midhi_prev_left = Vec::new();
         let mut midhi_prev_right = Vec::new();
@@ -221,18 +235,18 @@ impl Audio8DProcessor {
 
             let start_idx = chunk_idx * chunk_size;
             let end_idx = (start_idx + chunk_size).min(total_samples);
+            let len = end_idx - start_idx;
 
-            let mut source_buffer = vec![0.0; chunk_size];
-            let source_len = end_idx - start_idx;
-            source_buffer[..source_len].copy_from_slice(&input_samples[start_idx..end_idx]);
-
-            let mut bass_buffer = vec![0.0; chunk_size];
-            let mut mid_high_buffer = vec![0.0; chunk_size];
-
-            for (i, &sample) in source_buffer.iter().enumerate() {
-                let (bass, high) = self.crossover.process(sample);
-                bass_buffer[i] = bass * self.bass_boost_gain;
-                mid_high_buffer[i] = high;
+            let mut bass_left = vec![0.0; chunk_size];
+            let mut bass_right = vec![0.0; chunk_size];
+            let mut mid_high = vec![0.0; chunk_size];
+            for i in 0..len {
+                let (l, r) = input_samples[start_idx + i];
+                let (bass_l, mid_l) = self.crossover_left.process(l);
+                let (bass_r, mid_r) = self.crossover_right.process(r);
+                bass_left[i] = bass_l;
+                bass_right[i] = bass_r;
+                mid_high[i] = (mid_l + mid_r) * 0.5;
             }
 
             let (new_pos, new_distance) = position_calc.get_position(dt);
@@ -245,7 +259,7 @@ impl Audio8DProcessor {
 
             let mut mid_high_output = vec![(0.0, 0.0); chunk_size];
             let mid_high_context = HrtfContext {
-                source: &mid_high_buffer,
+                source: &mid_high,
                 output: &mut mid_high_output,
                 new_sample_vector: new_pos_normalized,
                 prev_sample_vector: prev_pos_normalized,
@@ -257,33 +271,29 @@ impl Audio8DProcessor {
 
             self.hrtf_processor.process_samples(mid_high_context);
 
-            let bass_gain_start = f32::powf(prev_distance_gain, 0.75);
-            let bass_gain_end = f32::powf(new_distance_gain, 0.75);
-
-            for i in 0..chunk_size {
+            for i in 0..len {
                 let (mid_high_left, mid_high_right) = mid_high_output[i];
 
-                let t = i as f32 / chunk_size as f32;
-                let bass_gain = bass_gain_start + (bass_gain_end - bass_gain_start) * t;
+                let t = i as f32 / len as f32;
+                let bass_gain = prev_distance_gain + (new_distance_gain - prev_distance_gain) * t;
 
-                let bass_mono = bass_buffer[i] * bass_gain;
-                let bass_left = bass_mono;
-                let bass_right = bass_mono;
-
-                let left = mid_high_left + bass_left;
-                let right = mid_high_right + bass_right;
+                let left = mid_high_left + bass_left[i] * bass_gain;
+                let right = mid_high_right + bass_right[i] * bass_gain;
 
                 let (reverb_left, reverb_right) = self.reverb.process(left, right);
                 let output_left = left * (1.0 - self.reverb_mix) + reverb_left * self.reverb_mix;
                 let output_right = right * (1.0 - self.reverb_mix) + reverb_right * self.reverb_mix;
 
-                if start_idx + i < total_samples {
-                    output[start_idx + i] = (output_left, output_right);
-                }
+                output[start_idx + i] = (output_left, output_right);
             }
 
             prev_pos = new_pos;
             prev_distance = new_distance;
+        }
+
+        for (l, r) in output.iter_mut() {
+            *l = self.low_shelf.run(*l);
+            *r = self.low_shelf.run(*r);
         }
 
         output

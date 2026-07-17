@@ -34,7 +34,7 @@ Options:
 Spatial options:
   -p, --pattern <PATTERN>            Movement pattern [default: circular] [possible values: circular, figure8, vertical-circle, helix, random]
   -a, --start-angle <DEGREES>        Starting angle in degrees, 0 - 359 [default: 0]
-  -v, --velocity <RPM|FROM,TO>       Rotation velocity, -100 - 100 RPM, positive - clockwise, negative - counterclockwise (single value or from,to range) [default: 15]
+  -v, --velocity <RPM|FROM,TO>       Rotation velocity, -100 - 100 RPM, positive - clockwise, negative - counterclockwise (single value or from,to range) [default: 10]
       --velocity-osc-speed <SPEED>   Velocity oscillation speed, 0 - 10 [default: 5]
   -e, --elevation <DEG|FROM,TO>      Elevation in degrees, -90 - 90 (single value or from,to range) [default: 0]
       --elevation-osc-speed <SPEED>  Elevation oscillation speed, 0 - 10 [default: 5]
@@ -42,8 +42,7 @@ Spatial options:
       --distance-osc-speed <SPEED>   Distance oscillation speed, 0 - 10 [default: 0.1]
 
 Bass options:
-  -b, --bass-boost <DB>        Bass boost in dB, -20 - 20 [default: 0]
-      --crossover <FREQUENCY>  Crossover frequency in Hz, 50 - 500 [default: 200]
+  -b, --bass-boost <DB>  Bass boost in dB, -20 - 20 [default: 0]
 
 Reverb options:
   -r, --reverb-mix <VALUE>
@@ -59,11 +58,13 @@ Reverb options:
 ### Basic Examples
 
 Process an audio file with default settings:
+
 ```bash
 make8d input.mp3 -o output.mp3
 ```
 
 Preview without saving (plays directly):
+
 ```bash
 make8d input.mp3
 ```
@@ -71,27 +72,23 @@ make8d input.mp3
 ### Advanced Examples
 
 **Slow circular movement with elevation change:**
+
 ```bash
 make8d input.mp3 -o output.mp3 --velocity 5 --elevation -20,20 --elevation-osc-speed 2
 ```
 
 **Fast figure-8 pattern with oscillating distance:**
+
 ```bash
 make8d input.mp3 -o output.mp3 --pattern figure8 --velocity 30 --distance 0.5,2.0 --distance-osc-speed 0.3
 ```
 
 **Increased bass and reverb:**
+
 ```bash
 make8d input.mp3 -o output.mp3 --bass-boost 3 --reverb-mix 0.7 --reverb-room 0.9 --reverb-dampening 0 --reverb-width 1
 ```
 
-## Technical Details
-
-- **Sample Rate**: All audio is processed at 44.1 kHz
-- **HRTF**: Uses IRC_1002_C impulse responses
-- **Crossover**: 4th-order Linkwitz-Riley filter (-24 dB/octave) for omnidirectional bass
-- **Reverb**: Freeverb algorithm
-
 ## License
 
-MIT License
+[MIT License](LICENSE)

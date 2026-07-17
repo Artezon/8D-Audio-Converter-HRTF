@@ -1,5 +1,6 @@
-use rodio::{OutputStreamBuilder, Sink, Source};
+use rodio::{DeviceSinkBuilder, Player, Source};
 use std::io::Write;
+use std::num::NonZero;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -7,27 +8,24 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-pub struct Player {
+pub struct AudioPlayer {
     output_samples: Vec<(f32, f32)>,
 }
 
-impl Player {
+impl AudioPlayer {
     pub fn new(output_samples: Vec<(f32, f32)>) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self { output_samples })
     }
 
     pub fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Get default audio output
-        let mut stream = OutputStreamBuilder::open_default_stream()?;
-        stream.log_on_drop(false);
-        let sink = Arc::new(Sink::connect_new(stream.mixer())); // Wrap in Arc for thread-safe sharing
+        let mut handle = DeviceSinkBuilder::open_default_sink()?;
+        handle.log_on_drop(false);
+        let player = Player::connect_new(&handle.mixer());
 
-        // Position tracking using a shared atomic counter
         let current_sample = Arc::new(AtomicUsize::new(0));
         let current_sample_clone = Arc::clone(&current_sample);
         let total_samples = self.output_samples.len();
 
-        // Create audio source from processed samples
         let source = StereoSampleSource::new(self.output_samples.clone(), 44100, current_sample);
 
         let total_duration = Duration::from_secs_f64(total_samples as f64 / 44100.0);
@@ -50,8 +48,8 @@ impl Player {
             thread::sleep(Duration::from_millis(100));
         });
 
-        sink.append(source);
-        sink.sleep_until_end();
+        player.append(source);
+        player.sleep_until_end();
 
         println!("\n\nPlayback finished!");
         Ok(())
@@ -102,12 +100,12 @@ impl Source for StereoSampleSource {
         Some(self.samples.len() * 2 - self.position)
     }
 
-    fn channels(&self) -> u16 {
-        2
+    fn channels(&self) -> NonZero<u16> {
+        NonZero::new(2).unwrap()
     }
 
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    fn sample_rate(&self) -> NonZero<u32> {
+        NonZero::new(self.sample_rate).unwrap()
     }
 
     fn total_duration(&self) -> Option<Duration> {

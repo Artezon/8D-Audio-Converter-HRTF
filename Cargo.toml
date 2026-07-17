@@ -1,19 +1,21 @@
 [package]
 name = "binaural_8d_audio"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5.51", features = ["derive"] }
-hrtf = "0.8.1"
-biquad = "0.5"
-freeverb = "0.1"
-hound = "3.5.1"
-symphonia = { version = "0.5.5", features = ["all"] }
-rubato = "0.16.2"
+clap = { version = "4.6", features = ["derive"] }
+hrtf = "0.8"
+biquad = "0.6"
+freeverb = "0.2"
+hound = "3.5"
+symphonia = { version = "0.6", features = ["all"] }
+symphonia-adapter-libopus = "0.3"
+rubato = "4.0"
 flacenc = "0.5"
-mp3lame-encoder = "0.2.1"
-rodio = "0.21.1"
+mp3lame-encoder = "0.2"
+rodio = "0.22"
+fastrand = "2.4"
 
 [profile.release]
 opt-level = 3

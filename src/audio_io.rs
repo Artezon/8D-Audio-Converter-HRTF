@@ -1,15 +1,10 @@
 use hound::{SampleFormat, WavSpec, WavWriter};
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
-use std::fs::File;
-use std::path::Path;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::FormatOptions;
+use rubato::{audioadapter_buffers::direct::InterleavedSlice, Fft, Resampler};
+use std::{fs::File, path::Path};
+use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::formats::{probe::Hint, FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 #[derive(Debug)]
 pub enum OutputFormat {
@@ -35,19 +30,21 @@ impl OutputFormat {
     }
 }
 
-/// Convert multi-channel audio to mono by averaging all channels
-fn convert_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
-    if channels == 1 {
-        return samples.to_vec();
-    }
-
-    samples
-        .chunks(channels)
-        .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-        .collect()
+fn tpdf_dither(value: f32, bits: u32) -> f32 {
+    let lsb = 2.0_f32.powi(-(bits as i32 - 1));
+    let noise = (fastrand::f32() - fastrand::f32()) * lsb;
+    value + noise
 }
 
-pub fn load_audio(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn ensure_stereo(samples: &[f32], channels: usize) -> Vec<(f32, f32)> {
+    match channels {
+        1 => samples.iter().map(|&s| (s, s)).collect(),
+        2 => samples.chunks(2).map(|c| (c[0], c[1])).collect(),
+        _ => samples.chunks(channels).map(|c| (c[0], c[1])).collect(),
+    }
+}
+
+pub fn load_audio(path: &Path) -> Result<Vec<(f32, f32)>, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -58,95 +55,91 @@ pub fn load_audio(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
 
     let format_opts = FormatOptions::default();
     let metadata_opts = MetadataOptions::default();
-    let decoder_opts = DecoderOptions::default();
 
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, format_opts, metadata_opts)
         .map_err(|e| format!("Failed to get audio format: {}", e))?;
 
-    let mut format = probed.format;
     let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .default_track(TrackType::Audio)
         .ok_or("No valid audio track found")?;
 
     let track_id = track.id;
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or("Sample rate not found")?;
-    let channels = track
-        .codec_params
+    let codec_params = track.codec_params.as_ref().ok_or("No codec parameters")?;
+    let audio_params = codec_params.audio().ok_or("Not an audio track")?;
+    let sample_rate = audio_params.sample_rate.ok_or("Sample rate not found")?;
+    let channels = audio_params
         .channels
+        .as_ref()
         .ok_or("Channel info not found")?
         .count();
 
-    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
+    let decoder_opts = AudioDecoderOptions::default();
+    let codec_registry = symphonia::default::get_codecs();
+    let mut decoder = codec_registry
+        .make_audio_decoder(
+            track.codec_params.as_ref().unwrap().audio().unwrap(),
+            &decoder_opts,
+        )
+        .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
     let mut all_samples = Vec::new();
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
+    while let Ok(Some(packet)) = format.next_packet() {
+        if packet.track_id != track_id {
             continue;
         }
 
         match decoder.decode(&packet) {
-            Ok(decoded) => {
-                let spec = *decoded.spec();
-                let duration = decoded.capacity() as u64;
-                let mut sample_buf = SampleBuffer::<f32>::new(duration, spec);
-                sample_buf.copy_interleaved_ref(decoded);
-
-                all_samples.extend_from_slice(sample_buf.samples());
+            Ok(audio_buf) => {
+                let nbframes = audio_buf.frames();
+                let num_channels = audio_buf.spec().channels().count();
+                let total_samples = nbframes * num_channels;
+                let mut interleaved = vec![0.0f32; total_samples];
+                audio_buf.copy_to_slice_interleaved(&mut interleaved);
+                all_samples.extend(interleaved);
             }
             Err(_) => continue,
         }
     }
 
-    let mut mono_samples = convert_to_mono(&all_samples, channels);
+    let stereo_samples = ensure_stereo(&all_samples, channels);
 
     if sample_rate != 44100 {
-        mono_samples = resample(mono_samples, sample_rate, 44100)?;
+        let interleaved: Vec<f32> = stereo_samples.iter().flat_map(|&(l, r)| [l, r]).collect();
+        let resampled = resample_interleaved(interleaved, sample_rate, 44100, 2)?;
+        Ok(resampled.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+    } else {
+        Ok(stereo_samples)
     }
-
-    Ok(mono_samples)
 }
 
-pub fn resample(
+fn resample_interleaved(
     samples: Vec<f32>,
     from_rate: u32,
     to_rate: u32,
+    channels: usize,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     if from_rate == to_rate {
         return Ok(samples);
     }
 
-    let params = SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
-    };
-
-    let mut resampler = SincFixedIn::<f32>::new(
-        to_rate as f64 / from_rate as f64,
-        2.0,
-        params,
-        samples.len(),
-        1,
+    let frames = samples.len() / channels;
+    let mut resampler = Fft::<f32>::new(
+        from_rate as usize,
+        to_rate as usize,
+        1024,
+        channels,
+        rubato::FixedSync::Input,
     )?;
 
-    let waves_in = vec![samples];
-    let waves_out = resampler.process(&waves_in, None)?;
+    let input = InterleavedSlice::new(&samples, channels, frames)
+        .map_err(|e| format!("Failed to create input buffer: {:?}", e))?;
+    let output = resampler
+        .process_all(&input, frames, None)
+        .map_err(|e| format!("Resampling failed: {:?}", e))?;
 
-    Ok(waves_out[0].clone())
+    Ok(output.take_data())
 }
 
 pub fn save_audio(
@@ -174,17 +167,13 @@ fn save_wav(
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
     };
-
     let mut writer = WavWriter::create(path, spec)?;
-
     for (left, right) in samples {
-        let left_sample = (left.clamp(-1.0, 1.0) * 32767.0) as i16;
-        let right_sample = (right.clamp(-1.0, 1.0) * 32767.0) as i16;
-
+        let left_sample = (tpdf_dither(left.clamp(-1.0, 1.0), 16) * 32767.0) as i16;
+        let right_sample = (tpdf_dither(right.clamp(-1.0, 1.0), 16) * 32767.0) as i16;
         writer.write_sample(left_sample)?;
         writer.write_sample(right_sample)?;
     }
-
     writer.finalize()?;
     Ok(())
 }
@@ -197,23 +186,18 @@ fn save_flac(
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
 
-    // Convert to interleaved i32 samples
     let mut i32_samples: Vec<i32> = Vec::with_capacity(samples.len() * 2);
     for (left, right) in samples {
-        i32_samples.push((left.clamp(-1.0, 1.0) * 32767.0) as i32);
-        i32_samples.push((right.clamp(-1.0, 1.0) * 32767.0) as i32);
+        i32_samples.push((tpdf_dither(left.clamp(-1.0, 1.0), 16) * 32767.0) as i32);
+        i32_samples.push((tpdf_dither(right.clamp(-1.0, 1.0), 16) * 32767.0) as i32);
     }
 
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|e| format!("FLAC config error: {:?}", e))?;
 
-    let source = flacenc::source::MemSource::from_samples(
-        &i32_samples,
-        2,  // channels
-        16, // bits_per_sample
-        sample_rate as usize,
-    );
+    let source =
+        flacenc::source::MemSource::from_samples(&i32_samples, 2, 16, sample_rate as usize);
 
     let flac_stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)?;
 
@@ -229,34 +213,25 @@ fn save_mp3(
     samples: &[(f32, f32)],
     sample_rate: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use mp3lame_encoder::{Builder, DualPcm, FlushNoGap};
+    use mp3lame_encoder::{Bitrate, Builder, DualPcm, FlushNoGap, Quality};
 
-    let mut builder = Builder::new().expect("Create LAME builder");
-    builder.set_num_channels(2).expect("set channels");
-    builder
-        .set_sample_rate(sample_rate)
-        .expect("set sample rate");
-    builder
-        .set_brate(mp3lame_encoder::Bitrate::Kbps320)
-        .expect("set bitrate");
-    builder
-        .set_quality(mp3lame_encoder::Quality::Best)
-        .expect("set quality");
+    let mut builder = Builder::new().unwrap();
+    builder.set_num_channels(2).unwrap();
+    builder.set_sample_rate(sample_rate).unwrap();
+    builder.set_brate(Bitrate::Kbps320).unwrap();
+    builder.set_quality(Quality::Best).unwrap();
 
-    let mut encoder = builder.build().expect("create encoder");
+    let mut encoder = builder.build().unwrap();
 
-    // Convert to separate i16 channels
     let mut left_channel: Vec<i16> = Vec::with_capacity(samples.len());
     let mut right_channel: Vec<i16> = Vec::with_capacity(samples.len());
-
     for (left, right) in samples {
-        left_channel.push((left.clamp(-1.0, 1.0) * 32767.0) as i16);
-        right_channel.push((right.clamp(-1.0, 1.0) * 32767.0) as i16);
+        left_channel.push((tpdf_dither(left.clamp(-1.0, 1.0), 16) * 32767.0) as i16);
+        right_channel.push((tpdf_dither(right.clamp(-1.0, 1.0), 16) * 32767.0) as i16);
     }
 
     let mut mp3_buffer = Vec::new();
 
-    // Encode in chunks using DualPcm
     const CHUNK_SIZE: usize = 32768;
     for i in (0..left_channel.len()).step_by(CHUNK_SIZE) {
         let end = (i + CHUNK_SIZE).min(left_channel.len());
@@ -268,18 +243,17 @@ fn save_mp3(
         mp3_buffer.reserve(mp3lame_encoder::max_required_buffer_size(input.left.len()));
         let encoded_size = encoder
             .encode(input, mp3_buffer.spare_capacity_mut())
-            .expect("encode chunk");
+            .unwrap();
 
         unsafe {
             mp3_buffer.set_len(mp3_buffer.len() + encoded_size);
         }
     }
 
-    // Flush remaining data
-    mp3_buffer.reserve(7200); // LAME requires at least 7200 bytes for flush
+    mp3_buffer.reserve(7200);
     let flushed_size = encoder
         .flush::<FlushNoGap>(mp3_buffer.spare_capacity_mut())
-        .expect("flush encoder");
+        .unwrap();
 
     unsafe {
         mp3_buffer.set_len(mp3_buffer.len() + flushed_size);

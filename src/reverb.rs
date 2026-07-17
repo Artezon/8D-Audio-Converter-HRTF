@@ -24,7 +24,7 @@ impl ReverbProcessor {
         (out_left as f32, out_right as f32)
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset_state(&mut self) {
         self.freeverb = Freeverb::new(self.sample_rate);
     }
 }

@@ -35,7 +35,7 @@ impl LinkwitzRileyCrossover {
         (bass, high)
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset_state(&mut self) {
         self.bass_stage1.reset_state();
         self.bass_stage2.reset_state();
         self.high_stage1.reset_state();

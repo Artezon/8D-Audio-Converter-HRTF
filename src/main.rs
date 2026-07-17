@@ -16,7 +16,7 @@ mod reverb;
 
 use audio_io::{load_audio, save_audio};
 use hrtf_8d::{Audio8DProcessor, MovementPattern, PositionCalculator};
-use player::Player;
+use player::AudioPlayer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,7 +61,7 @@ struct Args {
         short = 'v',
         long = "velocity",
         value_name = "RPM|FROM,TO",
-        default_value = "15",
+        default_value = "10",
         allow_hyphen_values = true,
         help_heading = "Spatial options"
     )]
@@ -124,15 +124,6 @@ struct Args {
         help_heading = "Bass options"
     )]
     bass_boost: f32,
-
-    /// Crossover frequency in Hz, 50 - 500
-    #[arg(
-        long,
-        value_name = "FREQUENCY",
-        default_value = "200",
-        help_heading = "Bass options"
-    )]
-    crossover: i32,
 
     /// Reverb mix amount, 0.0 - 1.0
     #[arg(
@@ -277,7 +268,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .check_range(0.1, 100.0, Some("Distance in meters"))?;
     args.distance_osc_speed
         .check_range(0.0, 10.0, Some("Distance oscillation speed"))?;
-    args.crossover.check_range(50, 500, Some("Crossover"))?;
     args.bass_boost
         .check_range(-20.0, 20.0, Some("Bass boost"))?;
     args.reverb_mix.check_range(0.0, 1.0, Some("Reverb mix"))?;
@@ -361,7 +351,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Distance: {:.2}m", args.distance.from);
     }
 
-    println!("  Crossover frequency: {} Hz", args.crossover);
     println!("  Bass boost: {:.1} dB", args.bass_boost);
     println!(
         "  Reverb mix: {:.2}, room size: {:.2}, dampening: {:.2}, stereo width: {:.2}\n",
@@ -382,7 +371,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut processor = Audio8DProcessor::new(
         hrir_sphere,
         44100,
-        args.crossover,
         args.reverb_room,
         args.reverb_dampening,
         args.reverb_width,
@@ -407,7 +395,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let normalized_output: Vec<(f32, f32)> = if max_sample > 0.001 {
         let target_level = 0.945;
-        let gain = (target_level / max_sample).min(1.0);
+        let gain = target_level / max_sample;
         println!("Normalized to -0.5 dB (gain: {:.3}x)\n", gain);
 
         output_samples
@@ -427,7 +415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Real-time playback mode
         println!("NOTE: You need headphones for the true 8D listening experience.\n");
-        let mut player = Player::new(normalized_output)?;
+        let mut player = AudioPlayer::new(normalized_output)?;
         player.play()?;
     }
 
