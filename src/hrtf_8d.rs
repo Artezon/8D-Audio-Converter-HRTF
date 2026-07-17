@@ -211,8 +211,10 @@ impl Audio8DProcessor {
         self.reverb.reset_state();
         self.low_shelf.reset_state();
 
-        let mut midhi_prev_left = Vec::new();
-        let mut midhi_prev_right = Vec::new();
+        let mut prev_left_l = Vec::new();
+        let mut prev_left_r = Vec::new();
+        let mut prev_right_l = Vec::new();
+        let mut prev_right_r = Vec::new();
 
         let dt = chunk_size as f32 / self.sample_rate as f32;
         let mut prev_pos = Vec3::new(0.0, 0.0, 1.0);
@@ -239,14 +241,16 @@ impl Audio8DProcessor {
 
             let mut bass_left = vec![0.0; chunk_size];
             let mut bass_right = vec![0.0; chunk_size];
-            let mut mid_high = vec![0.0; chunk_size];
+            let mut mid_high_left = vec![0.0; chunk_size];
+            let mut mid_high_right = vec![0.0; chunk_size];
             for i in 0..len {
                 let (l, r) = input_samples[start_idx + i];
                 let (bass_l, mid_l) = self.crossover_left.process(l);
                 let (bass_r, mid_r) = self.crossover_right.process(r);
                 bass_left[i] = bass_l;
                 bass_right[i] = bass_r;
-                mid_high[i] = (mid_l + mid_r) * 0.5;
+                mid_high_left[i] = mid_l;
+                mid_high_right[i] = mid_r;
             }
 
             let (new_pos, new_distance) = position_calc.get_position(dt);
@@ -257,28 +261,41 @@ impl Audio8DProcessor {
             let new_distance_gain = calculate_distance_gain(new_distance);
             let prev_distance_gain = calculate_distance_gain(prev_distance);
 
-            let mut mid_high_output = vec![(0.0, 0.0); chunk_size];
-            let mid_high_context = HrtfContext {
-                source: &mid_high,
-                output: &mut mid_high_output,
+            let mut left_hrtf_out = vec![(0.0, 0.0); chunk_size];
+            let left_context = HrtfContext {
+                source: &mid_high_left,
+                output: &mut left_hrtf_out,
                 new_sample_vector: new_pos_normalized,
                 prev_sample_vector: prev_pos_normalized,
-                prev_left_samples: &mut midhi_prev_left,
-                prev_right_samples: &mut midhi_prev_right,
+                prev_left_samples: &mut prev_left_l,
+                prev_right_samples: &mut prev_left_r,
                 new_distance_gain,
                 prev_distance_gain,
             };
+            self.hrtf_processor.process_samples(left_context);
 
-            self.hrtf_processor.process_samples(mid_high_context);
+            let mut right_hrtf_out = vec![(0.0, 0.0); chunk_size];
+            let right_context = HrtfContext {
+                source: &mid_high_right,
+                output: &mut right_hrtf_out,
+                new_sample_vector: new_pos_normalized,
+                prev_sample_vector: prev_pos_normalized,
+                prev_left_samples: &mut prev_right_l,
+                prev_right_samples: &mut prev_right_r,
+                new_distance_gain,
+                prev_distance_gain,
+            };
+            self.hrtf_processor.process_samples(right_context);
 
             for i in 0..len {
-                let (mid_high_left, mid_high_right) = mid_high_output[i];
+                let (left_l, left_r) = left_hrtf_out[i];
+                let (right_l, right_r) = right_hrtf_out[i];
 
                 let t = i as f32 / len as f32;
                 let bass_gain = prev_distance_gain + (new_distance_gain - prev_distance_gain) * t;
 
-                let left = mid_high_left + bass_left[i] * bass_gain;
-                let right = mid_high_right + bass_right[i] * bass_gain;
+                let left = (left_l + right_l) + bass_left[i] * bass_gain;
+                let right = (left_r + right_r) + bass_right[i] * bass_gain;
 
                 let (reverb_left, reverb_right) = self.reverb.process(left, right);
                 let output_left = left * (1.0 - self.reverb_mix) + reverb_left * self.reverb_mix;
