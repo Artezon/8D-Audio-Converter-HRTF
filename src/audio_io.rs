@@ -5,6 +5,7 @@ use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::{probe::Hint, FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
+use symphonia_adapter_libopus::OpusDecoder;
 
 #[derive(Debug)]
 pub enum OutputFormat {
@@ -75,7 +76,9 @@ pub fn load_audio(path: &Path) -> Result<Vec<(f32, f32)>, Box<dyn std::error::Er
         .count();
 
     let decoder_opts = AudioDecoderOptions::default();
-    let codec_registry = symphonia::default::get_codecs();
+    let mut codec_registry = symphonia::core::codecs::registry::CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut codec_registry);
+    codec_registry.register_audio_decoder::<OpusDecoder>();
     let mut decoder = codec_registry
         .make_audio_decoder(
             track.codec_params.as_ref().unwrap().audio().unwrap(),
