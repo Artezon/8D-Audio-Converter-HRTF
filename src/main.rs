@@ -1,10 +1,7 @@
 use clap::Parser;
 use hrtf::HrirSphere;
-use std::f32::consts::PI;
-use std::fmt::Display;
-use std::io::Write;
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::io::{stdin, stdout, Write};
+use std::{error::Error, f32::consts::PI, fmt::Display, path::PathBuf, str::FromStr};
 
 const HRIR_DATA: &[u8] = include_bytes!("../IRC_1002_C.bin");
 
@@ -251,7 +248,7 @@ impl IsInRangeCheck<f32> for ValueOrRange {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     args.start_angle
@@ -292,10 +289,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output_path.display()
             );
             print!("Do you want to overwrite it? (y/n): ");
-            std::io::stdout().flush().unwrap();
+            stdout().flush()?;
 
             let mut response = String::new();
-            std::io::stdin().read_line(&mut response)?;
+            stdin().read_line(&mut response)?;
 
             if !response.trim().eq_ignore_ascii_case("y") {
                 println!("Operation cancelled.");
@@ -383,7 +380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position_calc,
         Some(&|progress| {
             print!("\rProcessing: {}%", (progress * 100.0) as u32);
-            std::io::stdout().flush().unwrap();
+            let _ = stdout().flush();
         }),
     );
 

@@ -15,6 +15,7 @@ rubato = "4.0"
 flacenc = "0.5"
 mp3lame-encoder = "0.2"
 kira = "0.12"
+crossterm = { version = "0.28", features = ["events"] }
 fastrand = "2.4"
 
 [profile.release]
