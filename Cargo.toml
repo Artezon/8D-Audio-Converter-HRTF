@@ -1,6 +1,6 @@
 [package]
 name = "binaural_8d_audio"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [dependencies]
@@ -14,13 +14,14 @@ symphonia-adapter-libopus = "0.3"
 rubato = "4.0"
 flacenc = "0.5"
 mp3lame-encoder = "0.2"
-rodio = "0.22"
+kira = "0.12"
 fastrand = "2.4"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
+strip = true
 
 [[bin]]
 name = "make8d"
