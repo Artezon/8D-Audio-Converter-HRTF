@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform.name }})
+    env:
+      BIN_NAME: "make8d"
+    strategy:
+      matrix:
+        platform:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          # - name: macOS-arm64
+          #   os: macos-latest
+          #   target: aarch64-apple-darwin
+          #   ext: ""
+
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Use cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libasound2-dev
+
+      - name: Cargo build
+        run: cargo build --release --locked --target ${{ matrix.platform.target }}
+
+      - name: Package files
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.platform.target }}/release/${{ env.BIN_NAME }}${{ matrix.platform.ext }}" "dist/"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-${{ matrix.platform.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ./artifacts
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ./artifacts/**/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
